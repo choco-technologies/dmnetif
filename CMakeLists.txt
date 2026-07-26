@@ -64,16 +64,28 @@ dmod_add_library(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
     src/dmnetif.c
 )
 
-target_include_directories(${DMOD_MODULE_NAME} PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
-
 target_include_directories(${DMOD_MODULE_NAME}_if INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-# To depend on another module's headers, use:
-#   dmod_link_modules(${DMOD_MODULE_NAME}
-#       other_module@1.0
-#   )
+# dmroute: a separately published module, fetched via dmod_link_modules()
+# (which downloads its headers via dmf-get at configure time).
+#   dmroute_addr_t: the type dmnetif's IP/netmask/broadcast fields use
+#   dmnetif_set_ip_address() also calls dmroute_add()/_remove() directly
+#   to keep an interface's connected route in sync - see
+#   update_connected_route() in src/dmnetif.c
+# dmlist: backs the interface registry
+# dmdrvi: DMDRVI_IOCTL_NET_* commands/types used to talk to a registered
+#         interface's underlying device file
+# dmini:  dmdrvi.h includes dmini.h (dmini_context_t appears in dmdrvi_create's
+#         signature) - needed transitively even though dmnetif never calls it
+# dmosi:  mutex guarding the registry
+dmod_link_modules(${DMOD_MODULE_NAME}
+    dmroute
+    dmlist
+    dmdrvi
+    dmini
+    dmosi
+)
+
 add_subdirectory(tests)

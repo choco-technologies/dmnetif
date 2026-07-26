@@ -4,6 +4,7 @@ Welcome to the dmnetif module documentation.
 
 ## Contents
 
+- **[dmnetif.md](dmnetif.md)** - Overview and architecture
 - **[api-reference.md](api-reference.md)** - Complete API documentation
 
 ## Quick Reference
@@ -15,6 +16,6 @@ Welcome to the dmnetif module documentation.
 View documentation using `dmf-man`:
 
 ```bash
-dmf-man dmnetif          # Main documentation
-dmf-man dmnetif api      # API reference
+dmf-man dmnetif                # Main documentation
+dmf-man dmnetif api-reference   # API reference
 ```

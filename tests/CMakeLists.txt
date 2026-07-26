@@ -13,3 +13,12 @@ target_include_directories(${DMOD_MODULE_NAME} PRIVATE
 )
 
 target_link_libraries(${DMOD_MODULE_NAME} dmnetif_if)
+
+# dmroute: dmroute_addr_t (used directly to build test addresses), and
+#          verifies the connected-route side effect of
+#          dmnetif_set_ip_address() directly against dmroute's own API
+#          (dmroute_lookup() etc.) - see the "connected route" test steps
+#          in dmnetif_test.c.
+dmod_link_modules(${DMOD_MODULE_NAME}
+    dmroute
+)

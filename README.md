@@ -2,11 +2,12 @@
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-dmnetif DMOD library module.
-
-## Description
-
-TODO: describe what this module does.
+dmnetif DMOD library module - the network interface manager. It is the
+boundary between devfs (`dmdevfs`/`dmdrvi` device files, e.g.
+`/dev/dmeth0`) and the network: a driver registers the devfs path it was
+assigned as a named interface (`"eth0"`); everything above that line (a
+TCP/IP stack, `netctl`/`ifconfig`) only ever talks to dmnetif by interface
+name.
 
 ## Building
 
@@ -30,8 +31,6 @@ make DMOD_MODE=DMOD_MODULE DMOD_DIR=/path/to/dmod
 
 ## Usage
 
-This library module provides functions that can be used by other modules:
-
 ```c
 #include "dmnetif.h"
 ```
@@ -40,9 +39,11 @@ This library module provides functions that can be used by other modules:
 
 See the `docs/` directory:
 
+- **[dmnetif.md](docs/dmnetif.md)** - Overview and architecture
 - **[api-reference.md](docs/api-reference.md)** - Complete API documentation
 
 View documentation using `dmf-man dmnetif`.
+
 ## Project Structure
 
 ```
