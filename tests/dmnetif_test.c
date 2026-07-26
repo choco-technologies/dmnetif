@@ -19,7 +19,7 @@
 #include "dmroute.h"
 #include <string.h>
 
-#define TEST_DEVICE_PATH "/null"
+#define TEST_DEVICE_PATH "/dev/null"
 
 /* dmod modules have no libc memcmp() (see dmod/src/module/string.c's
  * minimal replacement set) - a small manual comparison stands in for it. */
