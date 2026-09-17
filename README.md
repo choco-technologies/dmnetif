@@ -6,14 +6,13 @@ dmnetif is a [DMOD](https://github.com/choco-technologies/dmod) library
 module - the network interface manager. It is the boundary between devfs
 (`dmdevfs`/`dmdrvi` device files, e.g. `/dev/dmeth0`) and the network: a
 driver registers the devfs path it was assigned as a named interface
-(`"eth0"`); everything above that line (a TCP/IP stack, `netctl`/`ifconfig`)
-only ever talks to dmnetif by interface name and never has to open a device
-file, know a `dmdrvi` ioctl command, or depend on `dmdrvi`/`dmdevfs` headers
-at all.
+(`"eth0"`); everything above that line only ever talks to dmnetif by
+interface name and never has to open a device file, know a `dmdrvi` ioctl
+command, or depend on `dmdrvi`/`dmdevfs` headers at all.
 
 ```
 ┌──────────────────────────────────────────────┐
-│  TCP/IP stack (networkd) / netctl / ifconfig  │
+│  TCP/IP stack (dmnetwork) / netctl / ifconfig │
 ├──────────────────────────────────────────────┤
 │                  DMNETIF                      │
 │   register/unregister, up/down, link status,  │
@@ -25,6 +24,26 @@ at all.
 │   Network driver (dmeth, ...) + DMDEVFS        │
 └──────────────────────────────────────────────┘
 ```
+
+A handful of modules link against dmnetif and call it directly for
+config/management (a driver registering itself, `dmdhcp` applying a lease,
+`ifconfig`/`dmnetwork` bringing an interface up), but the one path worth
+knowing is where an actual frame goes when something is sent or received -
+that path always runs through **`dmnetbridge`**, not straight from a
+protocol module to dmnetif:
+
+- **Send:** a protocol module (`dmip`, `dmarp`, ...) calls
+  `dmnetbridge_send()`/`_send_on_iface()`, which resolves the route/next-hop
+  MAC and is the one that actually calls `dmnetif_send()`.
+- **Receive:** `dmnetwork` runs one thread per interface calling
+  `dmnetbridge_handle_netif_rx()`, which is the only code path allowed to
+  call `dmnetif_receive()` on that interface - it then hands the frame to
+  every protocol module that registered for it (`dmip`, ...) via a DIF, so
+  they never call `dmnetif_receive()` themselves.
+
+`dmarp` is the one exception that talks to dmnetif directly for frame I/O
+(`dmnetif_send()`) rather than going through dmnetbridge, since ARP works
+below IP addressing and has no route to resolve.
 
 ## Key design points
 
@@ -48,11 +67,14 @@ at all.
 - **Setting the IP address keeps dmroute's connected route in sync.**
   `dmnetif_set_ip_address()` calls `dmroute_add()`/`_remove()` directly (see
   `update_connected_route()` in `src/dmnetif.c`), replacing only the route it
-  previously added for that interface. Set the netmask *before* the address
-  for it to be picked up - a netmask set afterward does not retroactively
-  refresh the route. With no netmask on record yet, it falls back to an
-  all-ones host mask so the interface is at least reachable by its own
-  address.
+  previously added for that interface - `_set_netmask()`/`_set_broadcast()`
+  never touch dmroute themselves. Set the netmask *before* the address for
+  it to be picked up - a netmask set afterward does not retroactively
+  refresh the route. With no matching-family netmask on record yet, it falls
+  back to an all-ones host mask so the interface is at least reachable by
+  its own address. This dependency is one-way: dmroute has no dependency on
+  dmnetif at all. See [docs/dmnetif.md](docs/dmnetif.md#keeping-a-connected-route-in-dmroute-in-sync)
+  for the full walkthrough.
 - **`dmnetif_receive()` is non-blocking only as far as the driver behind it
   is.** It's documented to return 0 immediately when nothing is pending, but
   a driver without its own non-blocking read (dmdrvi has no `O_NONBLOCK`/

@@ -11,7 +11,7 @@ without ever knowing devfs paths or dmdrvi ioctl commands exist.
 
 ```
 ┌──────────────────────────────────────────────┐
-│  TCP/IP stack (networkd) / netctl / ifconfig  │
+│  TCP/IP stack (dmnetwork) / netctl / ifconfig │
 ├──────────────────────────────────────────────┤
 │                  DMNETIF                      │
 │   register/unregister, up/down, link status,  │
@@ -23,6 +23,25 @@ without ever knowing devfs paths or dmdrvi ioctl commands exist.
 │   Network driver (dmeth, ...) + DMDEVFS        │
 └──────────────────────────────────────────────┘
 ```
+
+The driver registers itself directly, and a few management-facing modules
+(`dmdhcp` applying a lease, `ifconfig`/`dmnetwork` bringing an interface up)
+call dmnetif directly too - but the path an actual frame takes when
+something is sent or received always runs through **`dmnetbridge`**, not
+straight from a protocol module to dmnetif:
+
+- **Send:** a protocol module (`dmip`, `dmarp`, ...) calls
+  `dmnetbridge_send()`/`_send_on_iface()`, which resolves the route/next-hop
+  MAC and is the one that actually calls `dmnetif_send()`.
+- **Receive:** `dmnetwork` runs one thread per interface calling
+  `dmnetbridge_handle_netif_rx()`, the only code path allowed to call
+  `dmnetif_receive()` on that interface - it then hands the frame to every
+  protocol module that registered for it via a DIF, so they never call
+  `dmnetif_receive()` themselves.
+
+`dmarp` is the one exception that talks to dmnetif directly for frame I/O
+(`dmnetif_send()`) rather than going through dmnetbridge, since ARP works
+below IP addressing and has no route to resolve.
 
 ## Registration flow
 
@@ -62,34 +81,56 @@ calls `dmnetif_set_ip_address()`, and anything else that needs to know an
 interface's address (e.g. `ifconfig`) reads it back with
 `dmnetif_get_ip_address()`.
 
-`dmnetif_ip_addr_t` is one type for both IPv4 and IPv6 (a `family` tag plus
-a `v4[4]`/`v6[16]` union) rather than separate types and function pairs per
-family - callers branch on `family` once, not per function.
-
-`dmnetif_get_netmask()`/`_set_netmask()` and `_get_broadcast()`/
-`_set_broadcast()` sit right next to the address and reuse the same
-`dmnetif_ip_addr_t` type - both are shaped exactly like an address (4 or 16
+`dmroute_addr_t` (a `family` tag plus a `v4[4]`/`v6[16]` union, defined by
+`dmroute`, not by dmnetif) is the type for the IP address, netmask *and*
+broadcast fields - all three are shaped exactly like an address (4 or 16
 raw bytes), which is exactly why an IPv4 netmask/broadcast is conventionally
-written as a dotted-quad value ("255.255.255.0") in the first place.
-Nothing calls `dmnetif_set_netmask()` yet - it exists so whatever assigns
-the address (DHCP client or static config in `networkd`) has somewhere to
-put the netmask alongside it, rather than that becoming an afterthought
-bolted on later. `dmnetif_set_broadcast()` is the one exception that's
-already wired up end to end: `ifconfig <iface> broadcast <addr>` calls it
-directly.
-
-`dmnetif_set_ip_address()` also keeps the interface's directly-connected
-route in dmroute in sync, by calling `dmroute_add()`/
-`_remove()` directly (see `update_connected_route()` in `src/dmnetif.c`).
-dmnetif depends on dmroute for this the same ordinary way it depends on
-`dmlist` or `dmosi` - not through a DIF/MAL - since a routing table is
+written as a dotted-quad value ("255.255.255.0") in the first place. dmroute
+owns this type outright (it has no dependencies of its own to keep that
+way), so dmnetif borrowing it rather than defining a parallel copy costs
+nothing and keeps the two representations from ever drifting apart. This is
+a plain compile-time header dependency (`#include "dmroute.h"`), the same as
+depending on `dmlist` or `dmosi` - not a DIF/MAL, since a routing table is
 always wanted alongside an interface registry, not an optional/pluggable
-extra. IP addresses themselves use `dmroute_addr_t` rather than a type of
-dmnetif's own - dmroute owns the address type outright (it has no
-dependencies of its own to keep that way), so dmnetif borrowing it rather
-than defining a parallel copy costs nothing and keeps the two
-representations from ever drifting apart. See dmroute's own docs
-("Automatic registration") for what dmroute does with each call.
+extra.
+
+### Keeping a connected route in dmroute in sync
+
+`dmnetif_set_ip_address()` is the *only* one of the three setters that talks
+to dmroute - `dmnetif_set_netmask()`/`_set_broadcast()` are pure local
+bookkeeping. It calls `update_connected_route()` (`src/dmnetif.c`) after
+recording the new address, which:
+
+1. Removes whatever route it previously added for this interface
+   (`dmroute_remove(iface->connected_route)` - a no-op the first time, since
+   that starts out `NULL`).
+2. If the address was just cleared (`family == dmroute_family_none`), stops
+   there - clearing the address alone is enough to drop the route, nothing
+   else needs to call `dmroute_remove()` for that case.
+3. Otherwise adds a fresh one: `dmroute_add(&iface->ip, &netmask, NULL,
+   iface->name, DMROUTE_DEFAULT_METRIC, dmroute_origin_connected)` - no
+   gateway (`NULL`, it's directly connected), keyed by the interface's name
+   rather than its handle (dmroute has no notion of a dmnetif handle), and
+   tagged `dmroute_origin_connected` so it's identifiable as an
+   automatically-managed route rather than one a user added by hand.
+
+The netmask used in step 3 is whatever `dmnetif_set_netmask()` last recorded
+- **but only if its family matches the address's family**. If no netmask is
+on record yet, or it was set for the other IP family, `update_connected_route()`
+falls back to an all-ones host mask instead, so the interface is at least
+reachable by its own address in the meantime (e.g. a DHCP client that sets
+the address before the netmask). This is why the netmask has to be set
+*before* the address for it to be picked up - a netmask set afterward never
+retroactively refreshes an already-added route.
+
+The connected route is also dropped on interface teardown
+(`close_iface()`, called from `dmnetif_unregister()` and `dmod_deinit()`),
+so an unregistered/unplugged interface never leaves a stale route behind.
+
+This dependency is one-directional: dmnetif calls into dmroute, but dmroute
+has no dependency on dmnetif at all and knows nothing about interface
+handles - see dmroute's own docs for how it stores the interface name it
+gets handed here.
 
 ## MTU
 
