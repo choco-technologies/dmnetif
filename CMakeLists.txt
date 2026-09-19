@@ -77,10 +77,15 @@ target_include_directories(${DMOD_MODULE_NAME}_if INTERFACE
 # dmlist: backs the interface registry
 # dmdrvi: DMDRVI_IOCTL_NET_* commands/types used to talk to a registered
 #         interface's underlying device file
+# libsystemd: every interface is reported as a "netif" class device, so a
+#         device rule can start one service instance per interface (see
+#         notify_iface_added() in src/dmnetif.c). A real dependency, not an
+#         optional integration: dmnetif is simply not started without it.
 # dmini:  dmdrvi.h includes dmini.h (dmini_context_t appears in dmdrvi_create's
 #         signature) - needed transitively even though dmnetif never calls it
 # dmosi:  mutex guarding the registry
 dmod_link_modules(${DMOD_MODULE_NAME}
+    libsystemd
     dmroute
     dmlist
     dmdrvi

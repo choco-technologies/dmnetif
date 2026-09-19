@@ -21,6 +21,7 @@
 #define DMOD_ENABLE_REGISTRATION    ON
 #include "dmod.h"
 #include "dmnetif.h"
+#include "libsystemd.h"
 #include "dmroute.h"
 #include "dmlist.h"
 #include "dmdrvi.h"
@@ -252,6 +253,54 @@ int dmod_deinit(void)
     return 0;
 }
 
+/**
+ * @brief Device class dmnetif reports every interface under to libsystemd
+ *
+ * Matches the `[class=netif]` section of a device rules file (see
+ * networkd's networkd.rules), which maps a newly-reported interface to a
+ * service template - one `networkd@<name>` instance per interface, the
+ * same shape dmtty/console@.ini use for tty nodes.
+ */
+#define DMNETIF_LIBSYSTEMD_DEVICE_CLASS "netif"
+
+/**
+ * @brief Tell libsystemd an interface appeared, if libsystemd is around
+ *
+ * Called unconditionally: libsystemd is a declared dependency, and a module
+ * whose dependencies are missing is never started in the first place, so
+ * there is nothing to probe for here. (Dmod_IsFunctionConnected() answers a
+ * different question, and only inside dmod_preinit().)
+ *
+ * The device path travels as the rule's user value (`%v`), so a unit
+ * template can reach the backing node without looking it up again.
+ */
+static void notify_iface_added(const char* name, const char* device_path)
+{
+    int ret = libsystemd_notify_device_added(DMNETIF_LIBSYSTEMD_DEVICE_CLASS, name, device_path);
+
+    /* -ENOENT only means no rule matches the class yet, which is the normal
+     * case at boot: interfaces are registered while drivers come up, well
+     * before libsystemd loads its rules directory. The device is remembered
+     * and replayed once the rules arrive, so this is not a failure. */
+    if (ret != 0 && ret != -ENOENT)
+    {
+        DMOD_LOG_WARN("dmnetif: libsystemd_notify_device_added('%s', '%s') failed: %d\n",
+                      name, device_path, ret);
+    }
+}
+
+/**
+ * @brief Tell libsystemd an interface went away - see notify_iface_added()
+ */
+static void notify_iface_removed(const char* name)
+{
+    int ret = libsystemd_notify_device_removed(DMNETIF_LIBSYSTEMD_DEVICE_CLASS, name);
+    if (ret != 0 && ret != -ENOENT)
+    {
+        DMOD_LOG_WARN("dmnetif: libsystemd_notify_device_removed('%s') failed: %d\n", name, ret);
+    }
+}
+
 /* ---- Registration (driver-facing) ---- */
 
 /**
@@ -310,6 +359,10 @@ dmod_dmnetif_api_declaration(1.0, dmnetif_iface_t, _register, ( const char* name
     }
 
     DMOD_LOG_INFO("Registered network interface '%s' -> %s\n", name, device_path);
+
+    /* Reported only once the interface is actually in the list: the rule this
+     * fires starts a service that immediately looks the interface up by name. */
+    notify_iface_added(name, device_path);
     return iface;
 }
 
@@ -324,6 +377,9 @@ dmod_dmnetif_api_declaration(1.0, void, _unregister, ( dmnetif_iface_t iface ))
     dmosi_mutex_lock(g_mutex);
     dmlist_remove(g_ifaces, iface, compare_pointer);
     dmosi_mutex_unlock(g_mutex);
+
+    /* Before close_iface(), which frees the name this reports. */
+    notify_iface_removed(iface->name);
 
     close_iface(iface);
 }
