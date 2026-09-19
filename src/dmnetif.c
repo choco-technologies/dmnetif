@@ -218,7 +218,14 @@ static void close_iface(struct dmnetif_iface* iface)
  */
 int dmod_init(const Dmod_Config_t *Config)
 {
-    g_ifaces = dmlist_create(Dmod_GetCurrentAllocatorName());
+    /* DMOD_CURRENT_ALLOCATOR, not Dmod_GetCurrentAllocatorName(): dmod_init()
+     * runs on the thread of whoever enabled this module, so the "current"
+     * allocator is that process's - and allocation tracking bulk-frees a
+     * process's memory when it exits. State that belongs to the module has to
+     * be tagged to the module, or it dies with the first process that happened
+     * to pull it in, leaving this pointer aimed at whatever gets allocated
+     * there next. */
+    g_ifaces = dmlist_create(DMOD_CURRENT_ALLOCATOR);
     g_mutex  = dmosi_mutex_create(false);
     if (g_ifaces == NULL || g_mutex == NULL)
     {
