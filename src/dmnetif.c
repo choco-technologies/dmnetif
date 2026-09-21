@@ -419,43 +419,57 @@ dmod_dmnetif_api_declaration(1.0, size_t, _count, ( void ))
 }
 
 /**
- * @brief Closure passed as dmlist_foreach()'s user_data by dmnetif_for_each(),
- *        letting for_each_trampoline() recover the caller's own callback/
- *        user_data pair
- */
-typedef struct
-{
-    dmnetif_iterator_func_t callback;    /**< Caller-supplied callback to invoke per interface */
-    void*                   user_data;   /**< Caller-supplied opaque data, passed through to callback unchanged */
-} for_each_ctx_t;
-
-/**
- * @brief dmlist_iterator_func_t adapting dmlist's "void* data" element type
- *        to dmnetif_for_each()'s "dmnetif_iface_t iface" callback signature
- *
- * @param data      One interface currently in the registry (struct dmnetif_iface*)
- * @param user_data A for_each_ctx_t* (see dmnetif_for_each())
- *
- * @return Whatever the caller's own callback returns (true to continue, false to stop)
- */
-static bool for_each_trampoline(void* data, void* user_data)
-{
-    for_each_ctx_t* ctx = (for_each_ctx_t*)user_data;
-    return ctx->callback((dmnetif_iface_t)data, ctx->user_data);
-}
-
-/**
  * @brief Implementation of dmnetif_for_each() - see dmnetif.h
+ *
+ * Snapshots the registry into a temporary array under g_mutex, then invokes
+ * the caller's callback over that snapshot with the lock already released -
+ * deliberately not dmlist_foreach() under the lock, because the callback is
+ * caller-supplied and this registry has callers (e.g. ifconfig with no
+ * arguments) that do I/O per interface, including writing to a network-backed
+ * tty. That write can round-trip back through this same process's network
+ * stack, and every other user of g_mutex (dmnetif_register/_unregister/
+ * _find_by_name/_count, called from tasks like networkd) blocks on it for
+ * that whole time - long enough, under real timing, to deadlock: this task
+ * ends up stuck on a second lock somewhere in that write path while still
+ * holding g_mutex, and everything else waiting on g_mutex (networkd
+ * included) never gets a turn either. A snapshot means the lock is only
+ * ever held for the O(n) pointer copy, never for arbitrary caller code.
+ *
+ * This does trade away the strong guarantee that every snapshotted pointer
+ * is still live by the time the callback sees it - a concurrent
+ * dmnetif_unregister() frees the interface right after removing it from
+ * g_ifaces (see that function), same as it always could immediately after a
+ * dmnetif_find_by_name() call returns. Callers that enumerate interfaces
+ * and act on stale ones are not new to this function.
  */
 dmod_dmnetif_api_declaration(1.0, void, _for_each, ( dmnetif_iterator_func_t callback, void* user_data ))
 {
     if (callback == NULL)
         return;
 
-    for_each_ctx_t ctx = { .callback = callback, .user_data = user_data };
     dmosi_mutex_lock(g_mutex);
-    dmlist_foreach(g_ifaces, for_each_trampoline, &ctx);
+    size_t count = dmlist_size(g_ifaces);
+    dmnetif_iface_t* snapshot = (count > 0) ? Dmod_Malloc(count * sizeof(*snapshot)) : NULL;
+    if (snapshot != NULL)
+    {
+        for (size_t i = 0; i < count; i++)
+        {
+            snapshot[i] = (dmnetif_iface_t)dmlist_get(g_ifaces, i);
+        }
+    }
+    else
+    {
+        count = 0;
+    }
     dmosi_mutex_unlock(g_mutex);
+
+    for (size_t i = 0; i < count; i++)
+    {
+        if (!callback(snapshot[i], user_data))
+            break;
+    }
+
+    Dmod_Free(snapshot);
 }
 
 /**
